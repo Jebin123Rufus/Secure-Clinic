@@ -1,0 +1,65 @@
+"use strict";
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var RolesGuard_1;
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.RolesGuard = void 0;
+const common_1 = require("@nestjs/common");
+const core_1 = require("@nestjs/core");
+const roles_decorator_1 = require("../decorators/roles.decorator");
+let RolesGuard = RolesGuard_1 = class RolesGuard {
+    constructor(reflector) {
+        this.reflector = reflector;
+        this.logger = new common_1.Logger(RolesGuard_1.name);
+    }
+    canActivate(context) {
+        const requiredRoles = this.reflector.getAllAndOverride(roles_decorator_1.ROLES_KEY, [context.getHandler(), context.getClass()]);
+        const allowBreakGlass = this.reflector.getAllAndOverride(roles_decorator_1.ALLOW_BREAK_GLASS_KEY, [context.getHandler(), context.getClass()]);
+        if (!requiredRoles || requiredRoles.length === 0) {
+            return true;
+        }
+        const request = context.switchToHttp().getRequest();
+        const securityContext = request.securityContext;
+        if (!securityContext) {
+            throw new common_1.ForbiddenException('Access Denied: Missing security context. Unauthenticated request.');
+        }
+        const { userRole, isBreakGlass, breakGlassReason, userId, clinicId } = securityContext;
+        if (isBreakGlass) {
+            if (!breakGlassReason || breakGlassReason.trim().length < 10) {
+                throw new common_1.ForbiddenException('HIPAA Emergency Break-Glass Rejected: Mandatory clinical emergency justification (§ 164.312(a)(2)(ii)) must be at least 10 characters long.');
+            }
+            const canOverride = allowBreakGlass ?? true;
+            if (canOverride) {
+                this.logger.warn(`[CRITICAL AUDIT] Emergency Break-Glass override ACTIVE by user [${userId}] on route [${request.method} ${request.url}]. Reason: "${breakGlassReason}"`);
+                return true;
+            }
+        }
+        const hasRole = requiredRoles.includes(userRole);
+        if (!hasRole) {
+            this.logger.warn(`RBAC Access Denied: User [${userId}] with role [${userRole}] attempted to access resource requiring roles [${requiredRoles.join(', ')}] on clinic [${clinicId}].`);
+            throw new common_1.ForbiddenException(`Access Forbidden: Role "${userRole}" lacks sufficient privileges for this operation. Required: [${requiredRoles.join(', ')}].`);
+        }
+        if (userRole === 'Clerk' && (request.method === 'POST' || request.method === 'PUT')) {
+            const body = request.body;
+            if (body) {
+                if (body.medicalNotes !== undefined || body.diagnosisCode !== undefined) {
+                    throw new common_1.ForbiddenException('Least Privilege Violation: "Clerk" role is strictly barred from writing or modifying clinical diagnostic fields (medicalNotes, diagnosisCode).');
+                }
+            }
+        }
+        return true;
+    }
+};
+exports.RolesGuard = RolesGuard;
+exports.RolesGuard = RolesGuard = RolesGuard_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __metadata("design:paramtypes", [core_1.Reflector])
+], RolesGuard);
+//# sourceMappingURL=roles.guard.js.map
