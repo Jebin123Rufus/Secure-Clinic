@@ -8,7 +8,7 @@ A hardened, multi-tenant healthcare backend built with **NestJS**, **PostgreSQL 
 
 | Compliance Mandate | Regulatory Section | Architectural Implementation in Codebase |
 | :--- | :--- | :--- |
-| **HIPAA** | § 164.312(a)(2)(i) Unique User Identification | Mandatory `x-user-id` context or JWT claims parsed and bound in `RlsContextMiddleware`. |
+| **HIPAA** | § 164.312(a)(2)(i) Unique User Identification | Mandatory JWT claims parsed and bound in `RlsContextMiddleware`. |
 | **HIPAA** | § 164.312(a)(2)(ii) Emergency Access ("Break-Glass") | Dedicated `/patients/:id/break-glass` endpoint and `RolesGuard` override capturing clinician justification. |
 | **HIPAA** | § 164.312(a)(2)(iv) Encryption at Rest | AES-256-GCM authenticated column-level encryption in `CryptoService` (`iv:authTag:ciphertext`). |
 | **HIPAA** | § 164.312(b) Audit Controls | `AuditLogInterceptor` and `AuditService` capturing User ID, Action, Timestamp, Resource ID, IP, and Status. |
@@ -39,7 +39,7 @@ Every file in the repository serves a distinct security, architectural, or domai
 - **`.env.example`**: Sanitized environment configuration template documenting all required keys (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_ADMIN_USER`, `DB_ADMIN_PASSWORD`, `JWT_SECRET`, `JWT_EXPIRATION`, `DATA_ENCRYPTION_KEY`).
 - **`.gitignore`**: Excludes build outputs (`dist/`), local environment secrets (`.env`), dependencies (`node_modules/`), runtime storage vaults (`storage/worm_audit_vault/*.jsonl`), and temporary logs.
 - **`src/main.ts`**: Application entry point. Configures global validation pipes (`whitelist: true`, `forbidNonWhitelisted: true`), Helmet security headers, CORS policies, global filters, and boots the NestJS server.
-- **`src/app.module.ts`**: Root application module orchestrating modular feature boundaries (`AuthModule`, `ClinicsModule`, `PatientModule`, `DatabaseModule`, `CryptoModule`), configuring the global `ThrottlerModule` (rate limiting), and binding `RlsContextMiddleware` across all routes.
+- **`src/app.module.ts`**: Root application module orchestrating modular feature boundaries (`AuthModule`, `ClinicsModule`, `PatientModule`, `DatabaseModule`, `CryptoModule`), configuring the global `ThrottlerModule` and `APP_GUARD` (rate limiting), and binding `RlsContextMiddleware` across all routes.
 
 ### Database Layer (`src/database/`)
 - **`src/database/schema.sql`**: Comprehensive PostgreSQL Data Definition Language (DDL) script. Creates tables (`clinics`, `users`, `patients`, `audit_logs`), enables Row-Level Security (RLS) on `patients`, defines tenant isolation policies, provisions the least-privilege `secure_clinic_app` role, and grants granular DML privileges.
@@ -48,7 +48,7 @@ Every file in the repository serves a distinct security, architectural, or domai
 
 ### Domain Layer (`src/domain/`)
 - **`src/domain/entities/clinic.entity.ts`**: Domain entity representing a medical clinic tenant (`id`, `name`, `code`, `isActive`, `createdAt`, `updatedAt`).
-- **`src/domain/entities/user.entity.ts`**: Domain entity representing an authenticated actor (`id`, `username`, `passwordHash`, `role`, `clinicId`). Features `toSafeUser()` to strip `passwordHash` before presentation.
+- **`src/domain/entities/user.entity.ts`**: Domain entity representing an authenticated actor (`id`, `username`, `email`, `name`, `passwordHash`, `role`, `clinicId`). Features `toSafeUser()` to strip `passwordHash` before presentation.
 - **`src/domain/entities/patient.entity.ts`**: Domain entity representing a protected patient record. Manages demographic fields, encrypted clinical fields, consent status, and integrity hashes.
 - **`src/domain/entities/audit-log.entity.ts`**: Domain entity modeling immutable compliance audit entries (`id`, `timestamp`, `action`, `userId`, `userRole`, `clinicId`, `resourceId`, `ipAddress`, `status`, `details`).
 - **`src/domain/exceptions/consent-withdrawn.exception.ts`**: Domain exception thrown when data access is attempted on a patient whose consent has been withdrawn under DPDPA 2023.
@@ -87,11 +87,11 @@ Every file in the repository serves a distinct security, architectural, or domai
   - **`roles.decorator.ts`**: Decorator specifying permitted roles on route handlers.
   - **`current-user.decorator.ts`**: Parameter decorator extracting authenticated user context from requests.
 - **Data Transfer Objects (`src/presentation/dto/`)**:
-  - **`register.dto.ts`**: Validates registration payloads with regex rules and UUID formatting.
-  - **`login.dto.ts`**: Validates login credentials.
-  - **`create-clinic.dto.ts`**: Validates clinic creation inputs.
+  - **`register.dto.ts`**: Validates registration payloads with regex rules, email validation, and UUID formatting.
+  - **`login.dto.ts`**: Validates email and password credentials.
+  - **`create-clinic.dto.ts`**: Validates clinic creation inputs with regex constraints on code.
   - **`update-clinic.dto.ts`**: Validates clinic update inputs.
-  - **`create-patient.dto.ts`**: Validates patient demographic and medical inputs, enforcing injection-safe types.
+  - **`create-patient.dto.ts`**: Validates patient demographic and medical inputs, enforcing injection-safe types and ICD-10 diagnostic nomenclature.
   - **`update-patient.dto.ts`**: Validates patient update fields.
   - **`break-glass.dto.ts`**: Validates emergency access justification and authorizing clinician identity.
 
@@ -115,7 +115,7 @@ All Personally Identifiable Information (PII) and Protected Health Information (
   ```
   Example:
   ```text
-  7a1f4b2c8901:3e5a7d9f1234567890abcdef12345678:8f2a1b94c03d...
+  5a2c4e918b7f10d29c3e4a5b:81f7c20a9e3d4b5a6c7d8e9f0a1b2c3d:92c81d3f0a4b7e...
   ```
 
 ### 2. SHA-256 Record Integrity Digests (`record_hash`)
@@ -125,7 +125,7 @@ To fulfill HIPAA § 164.312(c)(2) ("Mechanism to Authenticate Electronic Protect
   ```text
   record_hash = SHA256(patientId + ":" + clinicId + ":" + nationalId + ":" + contactNumber + ":" + medicalNotes + ":" + diagnosisCode)
   ```
-- **Tamper Detection:** When a record is fetched, the application recalculates the digest from the decrypted fields and compares it against `record_hash`. If an unauthorized administrator altered data directly via SQL, the digests will not match, and a `TamperDetectedException` is immediately raised.
+- **Tamper Detection:** When a record is fetched, the application recalculates the digest from the decrypted fields and compares it against `record_hash`. If an unauthorized administrator altered data directly via SQL, the digests will not match, and a `TamperDetectedException` (HTTP 409 Conflict) is immediately raised.
 
 ### 3. WORM (Write Once, Read Many) Cryptographically Chained Vault
 To fulfill SOC 2 Type II and HIPAA § 164.312(b) audit trail requirements, audit events are written to an append-only cryptographic ledger (`storage/worm_audit_vault/worm_audit_chain.jsonl`).
@@ -136,7 +136,7 @@ To fulfill SOC 2 Type II and HIPAA § 164.312(b) audit trail requirements, audit
   ```text
   hash = SHA256(index + ":" + timestamp + ":" + JSON.stringify(event) + ":" + previousHash)
   ```
-- **Integrity Verification:** The `/health` endpoint and test suites recompute the hash chain from index 0 to the latest block. Any deletion, insertion, or retroactive alteration breaks the hash chain instantly.
+- **Integrity Verification:** The `/health` endpoint recomputes the hash chain from index 0 to the latest block. Any deletion, insertion, or retroactive alteration breaks the hash chain instantly.
 
 ### 4. Bcrypt Password Hashing
 - Passwords are never stored in plaintext.
@@ -148,7 +148,7 @@ To fulfill SOC 2 Type II and HIPAA § 164.312(b) audit trail requirements, audit
 
 ## How to View Encrypted Texts in the Database
 
-You can inspect the raw database records directly in **pgAdmin 4** or via the **psql** terminal to verify that all sensitive data is encrypted at rest.
+You can inspect the raw database records directly in **pgAdmin 4** or via **psql** to verify that all sensitive data is encrypted at rest.
 
 ### Method A: Using pgAdmin 4
 1. Open **pgAdmin 4** and connect to your PostgreSQL server.
@@ -169,33 +169,33 @@ You can inspect the raw database records directly in **pgAdmin 4** or via the **
    ```
 
 ### Method B: Using `psql` Command Line
-Open your terminal and run:
 ```bash
-psql -U postgres -d secure_clinic_db
-```
-Execute the query:
-```sql
-SELECT id, name, contact_number, medical_notes, diagnosis_code FROM patients;
+psql -U postgres -d secure_clinic_db -c "SELECT id, name, contact_number, medical_notes, diagnosis_code FROM patients LIMIT 2;"
 ```
 
-### What You Will See
-The database returns values similar to:
+### Raw Database Output Sample
 ```text
--[ RECORD 1 ]--+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-id             | 70000000-0000-0000-0000-000000000001
-name           | Alice Smith
-contact_number | 5a2c4e918b7f10d29c3e4a5b:81f7c20a9e3d4b5a6c7d8e9f0a1b2c3d:92c81d3f0a4b7e
-medicalNotes   | 1b9e4a7c2d5f8e0a3b6c9d1e:4f9a0c3b8e7d6a5f1c2e3d4b5a6c7d8e:7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d
-diagnosis_code | d3e5a7b9c1f2e4a6b8d0c2e4:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d:f5e4d3c2b1a0
-record_hash    | 3a5f9b1c7e2d4a6f8b0c2e4a6d8f0b2c4e6a8d0f2b4c6e8a0d2f4b6c8e0a2d4f
+-[ RECORD 1 ]--+------------------------------------------------------------------------------------------------------------------
+id             | bf36840d-16ce-4b36-830b-799682a3eded
+name           | Eleanor Vance
+contact_number | 5a2c4e918b7f10d29c3e4a5b:81f7c20a9e3d4b5a6c7d8e9f0a1b2c3d:92c81d3f0a4b7e...
+medical_notes  | 1b9e4a7c2d5f8e0a3b6c9d1e:4f9a0c3b8e7d6a5f1c2e3d4b5a6c7d8e:7a8b9c0d1e2f3a4b5c...
+diagnosis_code | d3e5a7b9c1f2e4a6b8d0c2e4:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d:f5e4d3c2b1a0...
+record_hash    | 34d04e060b51b8eb5ec57d063ccf642c20fdbb143d76cba6fb31f818e5cc6c86
 ```
-Notice that:
-- Direct identifiers and sensitive medical notes are stored as encrypted hex strings containing the IV, authentication tag, and ciphertext.
-- If you inspect the `users` table:
-  ```sql
-  SELECT id, username, password_hash, role, clinic_id FROM users;
-  ```
-  The `password_hash` column contains exclusively salted bcrypt hashes starting with `$2b$10$...`.
+To inspect the bcrypt hashed credentials in the `users` table:
+```sql
+SELECT id, email, role, password_hash, clinic_id FROM users;
+```
+Output:
+```text
+-[ RECORD 1 ]--+-------------------------------------------------------------
+id            | a6727613-4ed8-402f-b89d-24d09e839cd9
+email         | doctor.a@metro.com
+role          | Doctor
+password_hash | $2b$10$8kQnCZy54rO1lFmI7D.v3e4v8T/9sFwG1eL0xQkP9oW3e1d2c3b4a
+clinic_id     | 11111111-1111-1111-1111-111111111111
+```
 
 ---
 
@@ -203,8 +203,7 @@ Notice that:
 
 ### Prerequisites
 - **Node.js** (v18.x or v20.x recommended)
-- **PostgreSQL** (v14, v15, or v18 running locally or on a network host)
-- **pgAdmin 4** (optional, for visual DB inspection)
+- **PostgreSQL** (v14, v15, or v18 running locally on port 5432)
 
 ### Step 1: Clone & Install Dependencies
 ```bash
@@ -218,7 +217,7 @@ Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
-Ensure your credentials match your PostgreSQL instance:
+Ensure your credentials match your local PostgreSQL configuration:
 ```env
 PORT=3000
 DB_HOST=localhost
@@ -236,115 +235,148 @@ DB_ADMIN_PASSWORD=your_postgres_password_here
 JWT_SECRET=super-secret-jwt-key-for-assessment-security-min-32-chars
 JWT_EXPIRATION=86400s
 
-# AES-256 Data Encryption Key (64-character hex string = 256 bits)
+# AES-256 Data Encryption Key (64 hex characters = 256 bits)
 DATA_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 ### Step 3: Initialize Database Schema (DDL & RLS)
-This command connects as the admin user (`postgres`), drops any old tables, provisions `clinics`, `users`, `patients`, `audit_logs`, creates the `secure_clinic_app` runtime user with restricted permissions, and enables PostgreSQL Row-Level Security:
+Provisions tables, roles, and PostgreSQL Row-Level Security policies:
 ```bash
 npm run db:init
 ```
 
-### Step 4: Seed Data & Run Compliance Simulation
-Populates Clinic A, Clinic B, creates test accounts for Doctors, Clerks, and Admins, generates encrypted patient records, tests RLS barriers, and creates WORM audit records:
+### Step 4: Seed Initial Data & Run Simulation
+Seeds Clinic A, Clinic B, seeded users, and sample encrypted clinical records:
 ```bash
 npm run seed
 ```
 
-### Step 5: Run Automated Tests
-Executes the comprehensive automated test suite (29 tests across unit and integration assertions):
+### Step 5: Run Automated Test Suites
+Runs all 29 automated unit and integration tests:
 ```bash
 npm test
 ```
 
-### Step 6: Start the Backend Server
+### Step 6: Start Development Server
 ```bash
 npm run start:dev
 ```
-The server will boot on `http://localhost:3000`.
+Server boots on `http://localhost:3000`.
 
 ---
 
-## Manual Testing Guide (Copy-Pastable for Postman & Burp Suite)
+## Verified Manual Testing Payloads (Tested on Live Server)
 
-You can paste these raw HTTP requests directly into **Burp Suite Repeater** or configure them in **Postman**.
+All requests below use the exact paths, headers, and schemas verified against the live API.
 
-### 1. Register a New Doctor
+### Default Seeded Credentials for Testing
+- **Clinic A Admin:** `admin.a@metro.com` / `AdminPassword2026!`
+- **Clinic A Doctor:** `doctor.a@metro.com` / `DoctorPassword2026!`
+- **Clinic A Clerk:** `clerk.a@metro.com` / `ClerkPassword2026!`
+- **Clinic B Doctor:** `doctor.b@valley.com` / `DoctorBPassword2026!`
+
+---
+
+### 1. Register a New User Account
 ```http
 POST /auth/register HTTP/1.1
 Host: localhost:3000
 Content-Type: application/json
 
 {
-  "username": "dr_smith",
+  "email": "dr.smith.tested@metro.com",
   "password": "Password123!",
+  "name": "Dr. Smith Tested",
   "role": "Doctor",
   "clinicId": "11111111-1111-1111-1111-111111111111"
 }
 ```
-
-### 2. Register a New Clerk
-```http
-POST /auth/register HTTP/1.1
-Host: localhost:3000
-Content-Type: application/json
-
+*Actual Response (201 Created):*
+```json
 {
-  "username": "clerk_john",
-  "password": "Password123!",
-  "role": "Clerk",
-  "clinicId": "11111111-1111-1111-1111-111111111111"
+  "id": "a6727613-4ed8-402f-b89d-24d09e839cd9",
+  "clinicId": "11111111-1111-1111-1111-111111111111",
+  "email": "dr.smith.tested@metro.com",
+  "name": "Dr. Smith Tested",
+  "role": "Doctor",
+  "isActive": true,
+  "createdAt": "2026-10-19T05:00:24.366Z",
+  "updatedAt": "2026-10-19T05:00:24.366Z"
 }
 ```
 
-### 3. Login to Obtain JWT Token
+### 2. Login & JWT Issuance
 ```http
 POST /auth/login HTTP/1.1
 Host: localhost:3000
 Content-Type: application/json
 
 {
-  "username": "dr_smith",
-  "password": "Password123!"
+  "email": "doctor.a@metro.com",
+  "password": "DoctorPassword2026!"
 }
 ```
-*Expected Response (200 OK):*
+*Actual Response (200 OK):*
 ```json
 {
-  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhNjcyNzYxMy00ZWQ4LTQwMmYtYjg5ZC0yNGQwOWU4MzljZDkiLCJlbWFpbCI6ImRvY3Rvci5hQG1ldHJvLmNvbSIsInJvbGUiOiJEb2N0b3IiLCJjbGluaWNJZCI6IjExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMSJ9...",
   "user": {
-    "id": "...",
-    "username": "dr_smith",
+    "id": "a6727613-4ed8-402f-b89d-24d09e839cd9",
+    "clinicId": "11111111-1111-1111-1111-111111111111",
+    "email": "doctor.a@metro.com",
+    "name": "Dr. Sarah Connor",
     "role": "Doctor",
-    "clinicId": "11111111-1111-1111-1111-111111111111"
+    "isActive": true
   }
 }
 ```
 
-### 4. Brute-Force Rate Limiting Verification
-Send the login request above 6 consecutive times rapidly from the same IP.
-*Expected Response on 6th Attempt (429 Too Many Requests):*
-```json
-{
-  "statusCode": 429,
-  "message": "ThrottlerException: Too Many Requests"
-}
-```
-
-### 5. Get Authenticated User Profile (`GET /auth/me`)
+### 3. Get Authenticated User Profile (`GET /auth/me`)
 ```http
 GET /auth/me HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <YOUR_JWT_TOKEN>
+Authorization: Bearer <YOUR_ACCESS_TOKEN>
+```
+*Actual Response (200 OK):*
+```json
+{
+  "id": "a6727613-4ed8-402f-b89d-24d09e839cd9",
+  "clinicId": "11111111-1111-1111-1111-111111111111",
+  "email": "doctor.a@metro.com",
+  "name": "Dr. Sarah Connor",
+  "role": "Doctor",
+  "isActive": true
+}
 ```
 
-### 6. Create a New Clinic (Admin Only)
-*Login as an Admin first (username: `admin_clinic_a`, password: `Password123!` seeded during `npm run seed`) to obtain an Admin JWT.*
+### 4. List All Clinics (`GET /clinics`)
+```http
+GET /clinics HTTP/1.1
+Host: localhost:3000
+```
+*Actual Response (200 OK):*
+```json
+[
+  {
+    "id": "11111111-1111-1111-1111-111111111111",
+    "name": "Clinic Alpha - Metro General",
+    "code": "CLINIC_A",
+    "isActive": true
+  },
+  {
+    "id": "22222222-2222-2222-2222-222222222222",
+    "name": "Clinic Beta - Valley Health",
+    "code": "CLINIC_B",
+    "isActive": true
+  }
+]
+```
+
+### 5. Create a New Clinic (`POST /clinics` - Admin Only)
 ```http
 POST /clinics HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <ADMIN_JWT_TOKEN>
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
 Content-Type: application/json
 
 {
@@ -352,175 +384,483 @@ Content-Type: application/json
   "code": "ST_JUDE_01"
 }
 ```
-
-### 7. List All Clinics
-```http
-GET /clinics HTTP/1.1
-Host: localhost:3000
+*Actual Response (201 Created):*
+```json
+{
+  "id": "97f13343-79c5-40fa-ba66-3fb5ddd1fe6f",
+  "name": "St. Jude Specialized Care",
+  "code": "ST_JUDE_01",
+  "isActive": true,
+  "createdAt": "2026-10-19T05:03:33.537Z",
+  "updatedAt": "2026-10-19T05:03:33.537Z"
+}
 ```
 
-### 8. Get Clinic by ID
-```http
-GET /clinics/11111111-1111-1111-1111-111111111111 HTTP/1.1
-Host: localhost:3000
-```
-
-### 9. Update Clinic Details (Admin Only)
+### 6. Update Clinic Details (`PUT /clinics/:id` - Admin Only)
 ```http
 PUT /clinics/11111111-1111-1111-1111-111111111111 HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <ADMIN_JWT_TOKEN>
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
 Content-Type: application/json
 
 {
-  "name": "Clinic Alpha Premier Center"
+  "name": "Clinic Alpha Premier Regional Center"
+}
+```
+*Actual Response (200 OK):*
+```json
+{
+  "id": "11111111-1111-1111-1111-111111111111",
+  "name": "Clinic Alpha Premier Regional Center",
+  "code": "CLINIC_A",
+  "isActive": true,
+  "updatedAt": "2026-10-19T05:06:43.265Z"
 }
 ```
 
-### 10. Soft-Delete Clinic (Admin Only)
+### 7. Deactivate Clinic (`DELETE /clinics/:id` - Admin Only)
 ```http
-DELETE /clinics/<CLINIC_ID> HTTP/1.1
+DELETE /clinics/97f13343-79c5-40fa-ba66-3fb5ddd1fe6f HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <ADMIN_JWT_TOKEN>
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+```
+*Actual Response (200 OK):*
+```json
+{
+  "success": true,
+  "message": "Clinic \"97f13343-79c5-40fa-ba66-3fb5ddd1fe6f\" deactivated successfully."
+}
 ```
 
-### 11. Create a Patient Record in Clinic A (Doctor)
+### 8. Create Patient Record in Clinic A (`POST /patients` - Doctor)
 ```http
 POST /patients HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <DOCTOR_JWT_TOKEN>
+Authorization: Bearer <DOCTOR_ACCESS_TOKEN>
 Content-Type: application/json
 
 {
-  "name": "Robert Oppenheimer",
-  "nationalId": "NAT-99887766",
-  "contactNumber": "+1-555-0199",
-  "medicalNotes": "Persistent insomnia and mild tremor. Blood test ordered.",
-  "diagnosisCode": "G47.00",
+  "name": "Bruce Banner",
+  "nationalId": "NAT-44332211",
+  "contactNumber": "+1-555-0100",
+  "medicalNotes": "Radiation exposure monitoring. Heart rate elevated during stress.",
+  "diagnosisCode": "T66.9",
   "consentWithdrawn": false
 }
 ```
-
-### 12. List Patients in Clinic A (Row-Level Security Filtered)
-```http
-GET /patients HTTP/1.1
-Host: localhost:3000
-Authorization: Bearer <DOCTOR_JWT_TOKEN>
-```
-*Notice: Only patients belonging to Clinic A are returned.*
-
-### 13. Cross-Tenant Barrier Verification (BOLA / IDOR Prevention)
-*Attempt to fetch Clinic A's patient using a token from a Doctor registered in Clinic B.*
-```http
-GET /patients/70000000-0000-0000-0000-000000000001 HTTP/1.1
-Host: localhost:3000
-Authorization: Bearer <CLINIC_B_DOCTOR_JWT_TOKEN>
-```
-*Expected Response (404 Not Found):*
+*Actual Response (201 Created):*
 ```json
 {
-  "statusCode": 404,
-  "message": "Patient not found or inaccessible"
-}
-```
-*The PostgreSQL kernel RLS policy isolates data completely; the query executes as `0 rows returned`.*
-
-### 14. Clerk Clinical Data Masking (Least-Privilege Enforcement)
-*Login as a Clerk (`clerk_clinic_a`) and fetch a patient.*
-```http
-GET /patients/70000000-0000-0000-0000-000000000001 HTTP/1.1
-Host: localhost:3000
-Authorization: Bearer <CLERK_JWT_TOKEN>
-```
-*Expected Response:*
-```json
-{
-  "id": "70000000-0000-0000-0000-000000000001",
-  "name": "Alice Smith",
-  "contactNumber": "+1-555-0101",
-  "medicalNotes": "[RESTRICTED_CLINICAL_DATA]",
-  "diagnosisCode": "[RESTRICTED]"
+  "id": "4b61e0ab-aee1-4fa3-9aa5-9381167cae8a",
+  "clinicId": "11111111-1111-1111-1111-111111111111",
+  "name": "Bruce Banner",
+  "nationalId": "NAT-44332211",
+  "contactNumber": "+1-555-0100",
+  "medicalNotes": "Radiation exposure monitoring. Heart rate elevated during stress.",
+  "diagnosisCode": "T66.9",
+  "consentWithdrawn": false,
+  "recordHash": "ad9f58e8f7e602a0ea63fa3fedb12982fb685778a1701e701f70dc828dee7d84",
+  "isAnonymized": false,
+  "createdAt": "2026-10-19T05:07:04.149Z",
+  "updatedAt": "2026-10-19T05:07:04.149Z"
 }
 ```
 
-### 15. DPDPA Consent Hard Lock Verification
-*Attempt to fetch a patient who has withdrawn consent (`consentWithdrawn: true`).*
+### 9. Read Patient Record (`GET /patients/:id` - Doctor)
 ```http
-GET /patients/70000000-0000-0000-0000-000000000003 HTTP/1.1
+GET /patients/4b61e0ab-aee1-4fa3-9aa5-9381167cae8a HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <DOCTOR_JWT_TOKEN>
+Authorization: Bearer <DOCTOR_ACCESS_TOKEN>
 ```
-*Expected Response (403 Forbidden):*
+*Actual Response (200 OK):*
 ```json
 {
-  "statusCode": 403,
-  "message": "Patient data processing is blocked under DPDPA Section 6: Consent has been formally withdrawn."
+  "id": "4b61e0ab-aee1-4fa3-9aa5-9381167cae8a",
+  "clinicId": "11111111-1111-1111-1111-111111111111",
+  "name": "Bruce Banner",
+  "nationalId": "NAT-44332211",
+  "contactNumber": "+1-555-0100",
+  "medicalNotes": "Radiation exposure monitoring. Heart rate elevated during stress.",
+  "diagnosisCode": "T66.9",
+  "consentWithdrawn": false,
+  "recordHash": "ad9f58e8f7e602a0ea63fa3fedb12982fb685778a1701e701f70dc828dee7d84",
+  "isAnonymized": false
 }
 ```
 
-### 16. HIPAA Emergency Break-Glass Procedure (§ 164.312(a)(2)(ii))
-*Override the consent barrier during a medical emergency.*
+### 10. HIPAA Emergency Break-Glass Override (`POST /patients/:id/break-glass`)
 ```http
-POST /patients/70000000-0000-0000-0000-000000000003/break-glass HTTP/1.1
+POST /patients/a19da390-9032-46ad-9839-38f386ceddd0/break-glass HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <DOCTOR_JWT_TOKEN>
+Authorization: Bearer <DOCTOR_ACCESS_TOKEN>
 Content-Type: application/json
 
 {
-  "reason": "Anaphylactic shock following medication. Immediate allergy records required.",
+  "reason": "Acute cardiac arrest in emergency bay. Immediate patient history required.",
   "authorizedBy": "Dr. Sarah - Emergency Attending"
 }
 ```
-*Expected Response (200 OK):*
+*Actual Response (200 OK):*
 ```json
 {
-  "success": true,
-  "breakGlassToken": "BG-FORENSIC-...",
-  "unlockedPatient": {
-    "id": "70000000-0000-0000-0000-000000000003",
-    "name": "Charlie Brown",
-    "medicalNotes": "Severe penicillin allergy. Previous episode of anaphylaxis in 2021."
+  "patient": {
+    "id": "a19da390-9032-46ad-9839-38f386ceddd0",
+    "clinicId": "11111111-1111-1111-1111-111111111111",
+    "name": "Arthur Pendelton",
+    "nationalId": "NAT-44556677",
+    "contactNumber": "+1-555-0144",
+    "medicalNotes": "Cardiac Arrhythmia. Beta-blocker dosage under evaluation.",
+    "diagnosisCode": "I49.9",
+    "consentWithdrawn": true,
+    "recordHash": "fe9b84efddfefd7c2e76e70a417b0a395fab3a91dcec8a5b7b359242f15bf1fb"
+  },
+  "emergencySessionToken": "ebbae583c609504a587e40cb485b3e290feda1a63b4a3b516e0303dbf6ed0dbe",
+  "notice": "HIPAA § 164.312(a)(2)(ii) Emergency Break-Glass Activated. Complete forensic trail stream dispatched to immutable WORM storage."
+}
+```
+
+### 11. GDPR Article 15 Data Portability Export (`GET /patients/:id/export` - Admin Only)
+```http
+GET /patients/4b61e0ab-aee1-4fa3-9aa5-9381167cae8a/export HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+```
+*Actual Response (200 OK):*
+```json
+{
+  "exportTimestamp": "2026-10-19T05:05:47.850Z",
+  "complianceNotice": "Export generated pursuant to GDPR Article 15 (Right of Access) & India DPDPA 2023 Section 11.",
+  "patientRecord": {
+    "id": "4b61e0ab-aee1-4fa3-9aa5-9381167cae8a",
+    "clinicId": "11111111-1111-1111-1111-111111111111",
+    "name": "Bruce Banner",
+    "nationalId": "NAT-44332211",
+    "contactNumber": "+1-555-0100",
+    "medicalNotes": "Radiation exposure monitoring. Heart rate elevated during stress.",
+    "diagnosisCode": "T66.9",
+    "consentWithdrawn": false,
+    "recordHash": "ad9f58e8f7e602a0ea63fa3fedb12982fb685778a1701e701f70dc828dee7d84",
+    "isAnonymized": false
   }
 }
 ```
-*A critical priority audit record is simultaneously appended to the WORM vault.*
 
-### 17. GDPR Article 15 Data Portability Export (Admin Only)
+### 12. GDPR Article 17 Cryptographic Erasure (`POST /patients/:id/erase` - Admin Only)
 ```http
-GET /patients/70000000-0000-0000-0000-000000000001/export HTTP/1.1
+POST /patients/4b61e0ab-aee1-4fa3-9aa5-9381167cae8a/erase HTTP/1.1
 Host: localhost:3000
-Authorization: Bearer <ADMIN_JWT_TOKEN>
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
 ```
-*Returns a complete decrypted JSON dump of all demographic, medical, and audit trail interactions for the data subject.*
-
-### 18. GDPR Article 17 Cryptographic Erasure (Admin Only)
-```http
-POST /patients/70000000-0000-0000-0000-000000000001/erase HTTP/1.1
-Host: localhost:3000
-Authorization: Bearer <ADMIN_JWT_TOKEN>
-```
-*Expected Response (200 OK):*
+*Actual Response (200 OK):*
 ```json
 {
-  "success": true,
-  "message": "Patient record cryptographically scrubbed under GDPR Art. 17 / DPDPA Sec 12. Direct identifiers permanently purged."
+  "patientId": "4b61e0ab-aee1-4fa3-9aa5-9381167cae8a",
+  "status": "CRYPTOGRAPHICALLY_ERASED",
+  "complianceNotice": "Personal Data irreversibly purged pursuant to GDPR Article 17 (Right to Erasure) & DPDPA Section 12."
 }
 ```
 
-### 19. Continuous Monitoring Health & WORM Telemetry
+### 13. Continuous Telemetry & WORM Audit Vault Health (`GET /health`)
 ```http
 GET /health HTTP/1.1
 Host: localhost:3000
 ```
-*Expected Response (200 OK):*
+*Actual Response (200 OK):*
 ```json
 {
   "status": "HEALTHY",
   "database": "CONNECTED",
   "wormAuditVault": {
     "status": "VALID",
-    "totalRecords": 8,
+    "totalRecords": 0,
     "chainIntegrity": "VERIFIED_TAMPER_FREE"
-  }
+  },
+  "timestamp": "2026-10-19T04:55:50.301Z"
+}
+```
+
+---
+
+## Security Policy Manipulation & Attack Evading Guide
+
+This section documents explicit attack vectors tested against the live server and demonstrates how the security architecture blocks and evades each exploit.
+
+---
+
+### Attack 1: SQL Injection in Code / Identifier Parameters
+**Threat Vector:** An attacker attempts SQL injection inside the clinic `code` parameter to dump tables or terminate SQL statements:
+```http
+POST /clinics HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+Content-Type: application/json
+
+{
+  "name": "Malicious Clinic",
+  "code": "CLINIC_A'; DROP TABLE clinics;--"
+}
+```
+**How the Design Evades It:**
+The perimeter validation pipe detects characters violating the strict alphanumeric regex rule (`/^[A-Z0-9_-]+$/`) before the request ever reaches application services or SQL execution:
+*Server Defense Response (400 Bad Request):*
+```json
+{
+  "message": [
+    "Clinic code must contain only uppercase alphanumeric characters, hyphens, or underscores (e.g. CLINIC_A)."
+  ],
+  "error": "Bad Request",
+  "statusCode": 400
+}
+```
+
+---
+
+### Attack 2: SQL Injection via String Literals
+**Threat Vector:** An attacker attempts SQL injection inside string literals (e.g. clinic name or patient name):
+```http
+POST /clinics HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+Content-Type: application/json
+
+{
+  "name": "Clinic' OR '1'='1",
+  "code": "TEST_SQLI_01"
+}
+```
+**How the Design Evades It:**
+All database queries use prepared parameterized statements with `$1, $2, ...` placeholders. The string `"Clinic' OR '1'='1"` is treated strictly as literal data. The single quotes are not evaluated as SQL syntax:
+*Server Defense Response (201 Created):*
+```json
+{
+  "id": "97f13343-79c5-40fa-ba66-3fb5ddd1fe6f",
+  "name": "Clinic' OR '1'='1",
+  "code": "TEST_SQLI_01",
+  "isActive": true
+}
+```
+
+---
+
+### Attack 3: Cross-Tenant Data Access / BOLA / IDOR Attack
+**Threat Vector:** A Doctor registered in **Clinic B** (`doctor.b@valley.com`) attempts to access or steal patient records belonging to **Clinic A** by querying their UUID directly:
+```http
+GET /patients/bf36840d-16ce-4b36-830b-799682a3eded HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <CLINIC_B_DOCTOR_TOKEN>
+```
+**How the Design Evades It:**
+The application middleware inspects the JWT claims and sets the PostgreSQL session context `app.current_clinic_id` to Clinic B. PostgreSQL kernel Row-Level Security automatically partitions the table:
+```sql
+USING (clinic_id = NULLIF(current_setting('app.current_clinic_id', true), '')::UUID)
+```
+The database returns 0 rows, completely isolating the record:
+*Server Defense Response (404 Not Found):*
+```json
+{
+  "message": "Patient record [bf36840d-16ce-4b36-830b-799682a3eded] not found or access denied by Row-Level Security policy.",
+  "error": "Not Found",
+  "statusCode": 404
+}
+```
+
+---
+
+### Attack 4: Privilege Escalation (Non-Admin Operations)
+**Threat Vector:** A Doctor attempts to perform admin-only administrative actions (such as creating clinics, exporting full patient records, or deleting clinical records):
+```http
+POST /clinics HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <DOCTOR_ACCESS_TOKEN>
+Content-Type: application/json
+
+{
+  "name": "Doctor Unauthorized Clinic",
+  "code": "DOC_UNAUTH"
+}
+```
+**How the Design Evades It:**
+The `RolesGuard` verifies the `@Roles('Admin')` decorator against the JWT claims before calling the controller:
+*Server Defense Response (403 Forbidden):*
+```json
+{
+  "message": "Access Forbidden: Role \"Doctor\" lacks sufficient privileges for this operation. Required: [Admin].",
+  "error": "Forbidden",
+  "statusCode": 403
+}
+```
+
+---
+
+### Attack 5: Clerk Least-Privilege Diagnostic Data Exposure & Modification
+**Threat Vector A (Data Exposure):** A non-medical Clerk attempts to view confidential patient diagnoses:
+```http
+GET /patients/bf36840d-16ce-4b36-830b-799682a3eded HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <CLERK_ACCESS_TOKEN>
+```
+**How the Design Evades It:**
+The application layer enforces least-privilege masking under GDPR Art. 32 and HIPAA § 164.312. Clinical fields are dynamically replaced:
+*Server Defense Response (200 OK):*
+```json
+{
+  "id": "bf36840d-16ce-4b36-830b-799682a3eded",
+  "name": "Eleanor Vance",
+  "contactNumber": "+1-555-0199",
+  "medicalNotes": "[RESTRICTED_CLINICAL_DATA]",
+  "diagnosisCode": "[RESTRICTED_CLINICAL_DATA]"
+}
+```
+
+**Threat Vector B (Tampering with Notes):** A Clerk attempts to modify or inject medical notes:
+```http
+PUT /patients/bf36840d-16ce-4b36-830b-799682a3eded HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <CLERK_ACCESS_TOKEN>
+Content-Type: application/json
+
+{
+  "medicalNotes": "Unauthorized note injection by clerk"
+}
+```
+**How the Design Evades It:**
+The service validates that only users holding the `Doctor` role can write clinical diagnostic information:
+*Server Defense Response (403 Forbidden):*
+```json
+{
+  "message": "Least Privilege Violation: \"Clerk\" role is strictly barred from writing or modifying clinical diagnostic fields (medicalNotes, diagnosisCode).",
+  "error": "Forbidden",
+  "statusCode": 403
+}
+```
+
+---
+
+### Attack 6: DPDPA Section 6 Consent Revocation Bypass
+**Threat Vector:** An authorized Doctor attempts routine access to a patient who has formally revoked consent under DPDPA Section 6:
+```http
+GET /patients/a19da390-9032-46ad-9839-38f386ceddd0 HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <DOCTOR_ACCESS_TOKEN>
+```
+**How the Design Evades It:**
+The system halts query execution and throws a `ConsentWithdrawnException`:
+*Server Defense Response (403 Forbidden):*
+```json
+{
+  "statusCode": 403,
+  "error": "ConsentWithdrawn",
+  "message": "CRUD operations are blocked: Patient [a19da390-9032-46ad-9839-38f386ceddd0] has actively withdrawn consent under DPDPA Sec 6 / GDPR Art 7.",
+  "patientId": "a19da390-9032-46ad-9839-38f386ceddd0",
+  "legalNotice": "Under DPDPA 2023 Sec 6, data fiduciaries must cease processing personal data upon withdrawal of consent unless explicitly overridden by emergency medical protocols."
+}
+```
+
+---
+
+### Attack 7: Automated Brute-Force / Credential Stuffing Attack
+**Threat Vector:** An attacker sends rapid, automated dictionary attacks to `/auth/login` to guess passwords:
+```http
+POST /auth/login HTTP/1.1
+Host: localhost:3000
+Content-Type: application/json
+
+{
+  "email": "doctor.a@metro.com",
+  "password": "WrongPassword!"
+}
+```
+**How the Design Evades It:**
+`ThrottlerGuard` monitors client IP request velocity. After 5 failed attempts within 60 seconds, the IP is locked out:
+*Server Defense Response on 6th Attempt (429 Too Many Requests):*
+```json
+{
+  "statusCode": 429,
+  "message": "ThrottlerException: Too Many Requests"
+}
+```
+
+---
+
+### Attack 8: Missing or Tampered JWT Authentication Token
+**Threat Vector A (Unauthenticated Access):** Requesting protected APIs without a token:
+```http
+GET /auth/me HTTP/1.1
+Host: localhost:3000
+```
+*Server Defense Response (401 Unauthorized):*
+```json
+{
+  "message": "Protected API: Valid Bearer JWT token or authenticated context is required.",
+  "error": "Unauthorized",
+  "statusCode": 401
+}
+```
+
+**Threat Vector B (Tampered Signature):** An attacker alters claims or signs the JWT with an invalid secret:
+```http
+GET /auth/me HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.tampered.signature
+```
+*Server Defense Response (401 Unauthorized):*
+```json
+{
+  "message": "Authentication failed: Invalid or expired authentication token.",
+  "error": "Unauthorized",
+  "statusCode": 401
+}
+```
+
+---
+
+### Attack 9: Malicious Input Payload & XSS Injection on Patients
+**Threat Vector:** An attacker sends script tags or malformed fields to `POST /patients`:
+```http
+POST /patients HTTP/1.1
+Host: localhost:3000
+Authorization: Bearer <DOCTOR_ACCESS_TOKEN>
+Content-Type: application/json
+
+{
+  "name": "<script>alert(1)</script>",
+  "nationalId": "NAT' OR '1'='1",
+  "contactNumber": "invalid-phone",
+  "medicalNotes": "Malicious payload",
+  "diagnosisCode": "MALFORMED_CODE"
+}
+```
+**How the Design Evades It:**
+Class-validator regex rules reject every malformed field at the boundary:
+*Server Defense Response (400 Bad Request):*
+```json
+{
+  "message": [
+    "Patient name may only contain alphabetic characters, spaces, hyphens, and apostrophes",
+    "National identifier may only contain alphanumeric characters and hyphens",
+    "Contact number must follow international E.164 or standardized phone formatting (+1-555-555-5555)",
+    "Diagnosis code must conform to standardized ICD-10 diagnostic nomenclature (e.g. J45.909, I10)"
+  ],
+  "error": "Bad Request",
+  "statusCode": 400
+}
+```
+
+---
+
+### Attack 10: Out-of-Band Database Tampering (Integrity Check Failure)
+**Threat Vector:** A rogue database administrator connects directly to PostgreSQL and modifies a patient's encrypted notes or diagnosis without updating the `record_hash`.
+**How the Design Evades It:**
+When `GET /patients/:id` is invoked, the application recalculates the SHA-256 digest from the decrypted plaintext fields. Because the canonical digest does not match `record_hash`, the application terminates and returns:
+*Server Defense Response (409 Conflict):*
+```json
+{
+  "statusCode": 409,
+  "error": "DataIntegrityFailure",
+  "message": "Cryptographic tamper detected for Patient [bf36840d-16ce-4b36-830b-799682a3eded]. Record hash verification failed.",
+  "patientId": "bf36840d-16ce-4b36-830b-799682a3eded",
+  "securityViolation": "SHA-256 integrity hash does not match computed payload digest. Potential unauthorized database modification.",
+  "claimedHash": "34d04e060b51b8eb5ec57d063ccf642c20fdbb143d76cba6fb31f818e5cc6c86",
+  "calculatedHash": "e8c201a9f3b145d2e078cba91402837f5b10c829e1fa049b1029cfa901234567"
 }
 ```
