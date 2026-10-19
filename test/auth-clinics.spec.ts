@@ -31,6 +31,7 @@ describe('Auth & Clinics REST API Specification (Assessment Requirements)', () =
   });
 
   afterAll(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
     await app.close();
   });
 

@@ -61,6 +61,7 @@ describe('Secure Healthcare Multi-Tenant Backend Simulation', () => {
   });
 
   afterAll(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
     await app.close();
   });
 

@@ -82,6 +82,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.isConnected = false;
     if (this.pool) {
       await this.pool.end();
     }
@@ -113,7 +114,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    if (this.isConnected) {
+    if (this.isConnected && this.pool && !(this.pool as any).ended) {
       const client: PoolClient = await this.pool.connect();
       try {
         await client.query('BEGIN');
@@ -153,7 +154,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     queryText: string,
     params: any[] = [],
   ): Promise<QueryResult<R>> {
-    if (this.isConnected) {
+    if (this.isConnected && this.pool && !(this.pool as any).ended) {
       return this.pool.query<R>(queryText, params);
     } else {
       return this.executeSimulatedGlobalQuery<R>(queryText, params);

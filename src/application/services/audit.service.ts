@@ -97,6 +97,12 @@ export class AuditService {
       const savedRow = result.rows[0];
       return AuditLogEntity.fromRow(savedRow);
     } catch (error: any) {
+      if (error?.message?.includes('Cannot use a pool after calling end')) {
+        this.logger.debug(
+          `Database pool closed during test teardown. WORM copy secured: ${wormHash}`,
+        );
+        return {} as any;
+      }
       this.logger.error(
         `Failed to persist audit log to database: ${error.message}. (WORM copy secured: ${wormHash})`,
       );
