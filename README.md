@@ -1,10 +1,10 @@
-# 🛡️ SecureClinic: Production-Grade Healthcare Backend
+#  SecureClinic: Production-Grade Healthcare Backend
 
 A hardened, multi-tenant healthcare backend simulation template built with **NestJS**, **PostgreSQL Row-Level Security (RLS)**, and **Clean/Hexagonal Architecture**. Engineered to satisfy the rigorous compliance mandates of **HIPAA**, **SOC 2 Type II**, **GDPR**, **India DPDPA 2023**, and the **OWASP Top 10**.
 
 ---
 
-## 🏛️ Architecture & Compliance Matrix
+##  Architecture & Compliance Matrix
 
 | Compliance Mandate | Regulatory Section | Architectural Implementation |
 | :--- | :--- | :--- |
