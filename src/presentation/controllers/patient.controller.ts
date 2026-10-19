@@ -17,6 +17,7 @@ import { CreatePatientDto } from '../dto/create-patient.dto';
 import { UpdatePatientDto } from '../dto/update-patient.dto';
 import { BreakGlassDto } from '../dto/break-glass.dto';
 import { RolesGuard } from '../guards/roles.guard';
+import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { AuditLogInterceptor } from '../interceptors/audit-log.interceptor';
 import { Roles, AllowBreakGlass } from '../decorators/roles.decorator';
 import { CurrentSecurityContext } from '../decorators/current-user.decorator';
@@ -27,6 +28,7 @@ import { SecurityContext } from '../../infrastructure/database/database.service'
  *
  * Implements:
  * - Clean Architecture: Presentation layer isolated from domain and infrastructure.
+ * - Authentication & Authorization: Protected routes requiring JWT + RBAC RolesGuard
  * - Access Control Matrix:
  *   - 'Doctor': Full CRUD on patient demographic and medical records.
  *   - 'Clerk': Restricted to demographic fields; medical diagnosis access/writes barred.
@@ -36,7 +38,7 @@ import { SecurityContext } from '../../infrastructure/database/database.service'
  * - OWASP Top 10: Strict UUID parameter parsing, DTO whitelisting, audit logging.
  */
 @Controller('patients')
-@UseGuards(RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @UseInterceptors(AuditLogInterceptor)
 export class PatientController {
   constructor(private readonly patientService: PatientService) {}

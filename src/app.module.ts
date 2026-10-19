@@ -6,17 +6,22 @@ import {
 } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { CryptoModule } from './infrastructure/crypto/crypto.module';
 import { DatabaseModule } from './infrastructure/database/database.module';
-import { WormAuditService } from './infrastructure/worm/worm-audit.service';
-import { AuditService } from './application/services/audit.service';
-import { PatientService } from './application/services/patient.service';
-import { PatientController } from './presentation/controllers/patient.controller';
+import { CryptoModule } from './infrastructure/crypto/crypto.module';
+import { AuthModule } from './presentation/modules/auth.module';
+import { ClinicsModule } from './presentation/modules/clinics.module';
+import { PatientModule } from './presentation/modules/patient.module';
 import { HealthController } from './presentation/controllers/health.controller';
 import { RlsContextMiddleware } from './infrastructure/database/rls-context.middleware';
-import { RolesGuard } from './presentation/guards/roles.guard';
-import { AuditLogInterceptor } from './presentation/interceptors/audit-log.interceptor';
 
+/**
+ * Root Application Module
+ *
+ * Implements:
+ * - High Modularity: Feature modules (AuthModule, ClinicsModule, PatientModule, DatabaseModule, CryptoModule)
+ * - Global Rate Limiting via ThrottlerModule to mitigate brute-force and resource exhaustion
+ * - Multi-Tenant Row-Level Security Middleware binding across all tenant endpoints
+ */
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -29,23 +34,16 @@ import { AuditLogInterceptor } from './presentation/interceptors/audit-log.inter
         limit: 100,
       },
     ]),
-    CryptoModule,
     DatabaseModule,
+    CryptoModule,
+    AuthModule,
+    ClinicsModule,
+    PatientModule,
   ],
-  controllers: [HealthController, PatientController],
-  providers: [
-    WormAuditService,
-    AuditService,
-    PatientService,
-    RolesGuard,
-    AuditLogInterceptor,
-  ],
-  exports: [WormAuditService, AuditService, PatientService],
+  controllers: [HealthController],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
-    // Apply RlsContextMiddleware across all application routes
-    // Exempts /health natively inside middleware
     consumer
       .apply(RlsContextMiddleware)
       .forRoutes({ path: '*', method: RequestMethod.ALL });

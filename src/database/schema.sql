@@ -33,6 +33,24 @@ CREATE TABLE IF NOT EXISTS clinics (
 CREATE INDEX IF NOT EXISTS idx_clinics_code ON clinics(code);
 
 -- ----------------------------------------------------------------------------
+-- 2.1 USERS TABLE (Authentication & Role-Based Access Control - OWASP A02/A07)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    clinic_id UUID REFERENCES clinics(id) ON DELETE CASCADE,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL CHECK (role IN ('Doctor', 'Clerk', 'Admin')),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_clinic_id ON users(clinic_id);
+
+-- ----------------------------------------------------------------------------
 -- 3. PATIENTS TABLE (PHI Storage, Column-Level Encrypted, RLS-Enforced)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS patients (
@@ -153,7 +171,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON patients TO secure_clinic_app;
 GRANT SELECT, INSERT ON audit_logs TO secure_clinic_app;
 -- Deny UPDATE and DELETE on audit_logs for secure_clinic_app (Immutability guarantee)
 REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM secure_clinic_app;
-GRANT SELECT ON clinics TO secure_clinic_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON clinics TO secure_clinic_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON users TO secure_clinic_app;
 
 -- ----------------------------------------------------------------------------
 -- 7. SEED INITIAL TENANTS (Clinic A and Clinic B)

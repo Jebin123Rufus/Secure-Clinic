@@ -38,6 +38,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private inMemoryPatients: Map<string, any> = new Map();
   private inMemoryAuditLogs: any[] = [];
   private inMemoryClinics: Map<string, any> = new Map();
+  private inMemoryUsers: Map<string, any> = new Map();
 
   constructor(private readonly configService: ConfigService) {
     this.seedDefaultClinics();
@@ -141,6 +142,21 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     } else {
       // In-Memory Simulation Engine with strictly enforced RLS logic
       return this.executeSimulatedQuery<R>(queryText, params, context);
+    }
+  }
+
+  /**
+   * Executes a direct query without RLS tenant context (for authentication, user management, and clinics CRUD).
+   * Parameterized queries guarantee SQL injection protection (OWASP A03).
+   */
+  async executeQuery<R extends QueryResultRow = any>(
+    queryText: string,
+    params: any[] = [],
+  ): Promise<QueryResult<R>> {
+    if (this.isConnected) {
+      return this.pool.query<R>(queryText, params);
+    } else {
+      return this.executeSimulatedGlobalQuery<R>(queryText, params);
     }
   }
 
@@ -410,6 +426,122 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Default empty query
+    return Promise.resolve({
+      command: 'SELECT',
+      rowCount: 0,
+      oid: 0,
+      fields: [],
+      rows: [],
+    });
+  }
+
+  /**
+   * Simulation fallback for global (non-RLS) queries like users and clinics
+   */
+  private executeSimulatedGlobalQuery<R extends QueryResultRow = any>(
+    queryText: string,
+    params: any[],
+  ): Promise<QueryResult<R>> {
+    const trimmed = queryText.trim().toUpperCase();
+
+    // INSERT INTO USERS
+    if (trimmed.startsWith('INSERT INTO USERS')) {
+      const user = {
+        id: params[0],
+        clinic_id: params[1],
+        email: params[2],
+        password_hash: params[3],
+        name: params[4],
+        role: params[5],
+        is_active: true,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      this.inMemoryUsers.set(user.id, user);
+      return Promise.resolve({
+        command: 'INSERT',
+        rowCount: 1,
+        oid: 0,
+        fields: [],
+        rows: [user as unknown as R],
+      });
+    }
+
+    // SELECT FROM USERS WHERE EMAIL
+    if (trimmed.includes('FROM USERS') && trimmed.includes('EMAIL = $1')) {
+      const email = params[0];
+      const user = Array.from(this.inMemoryUsers.values()).find(
+        (u) => u.email.toLowerCase() === email.toLowerCase(),
+      );
+      const rows = user ? [user] : [];
+      return Promise.resolve({
+        command: 'SELECT',
+        rowCount: rows.length,
+        oid: 0,
+        fields: [],
+        rows: rows as unknown as R[],
+      });
+    }
+
+    // SELECT FROM USERS WHERE ID
+    if (trimmed.includes('FROM USERS') && trimmed.includes('ID = $1')) {
+      const id = params[0];
+      const user = this.inMemoryUsers.get(id);
+      const rows = user ? [user] : [];
+      return Promise.resolve({
+        command: 'SELECT',
+        rowCount: rows.length,
+        oid: 0,
+        fields: [],
+        rows: rows as unknown as R[],
+      });
+    }
+
+    // INSERT INTO CLINICS
+    if (trimmed.startsWith('INSERT INTO CLINICS')) {
+      const clinic = {
+        id: params[0],
+        name: params[1],
+        code: params[2],
+        is_active: true,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      this.inMemoryClinics.set(clinic.id, clinic);
+      return Promise.resolve({
+        command: 'INSERT',
+        rowCount: 1,
+        oid: 0,
+        fields: [],
+        rows: [clinic as unknown as R],
+      });
+    }
+
+    // SELECT FROM CLINICS WHERE ID
+    if (trimmed.includes('FROM CLINICS') && trimmed.includes('ID = $1')) {
+      const clinic = this.inMemoryClinics.get(params[0]);
+      const rows = clinic ? [clinic] : [];
+      return Promise.resolve({
+        command: 'SELECT',
+        rowCount: rows.length,
+        oid: 0,
+        fields: [],
+        rows: rows as unknown as R[],
+      });
+    }
+
+    // SELECT FROM CLINICS (List)
+    if (trimmed.includes('FROM CLINICS')) {
+      const rows = Array.from(this.inMemoryClinics.values()).filter((c) => c.is_active);
+      return Promise.resolve({
+        command: 'SELECT',
+        rowCount: rows.length,
+        oid: 0,
+        fields: [],
+        rows: rows as unknown as R[],
+      });
+    }
+
     return Promise.resolve({
       command: 'SELECT',
       rowCount: 0,

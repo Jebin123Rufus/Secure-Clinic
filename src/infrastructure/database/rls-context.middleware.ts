@@ -5,6 +5,7 @@ import {
   NestMiddleware,
 } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
+import * as jwt from 'jsonwebtoken';
 import { DatabaseService, SecurityContext } from './database.service';
 
 export interface RequestWithSecurityContext extends Request {
@@ -37,33 +38,53 @@ export class RlsContextMiddleware implements NestMiddleware {
   constructor(private readonly databaseService: DatabaseService) {}
 
   use(req: Request, res: Response, next: NextFunction): void {
-    // Whitelist public/health endpoints from mandatory tenant context requirements
-    if (req.path === '/health' || req.path === '/' || req.path === '/favicon.ico') {
+    // Whitelist public, auth, clinics, and health endpoints from mandatory tenant context requirements
+    if (
+      req.path === '/health' ||
+      req.path === '/' ||
+      req.path === '/favicon.ico' ||
+      req.path.startsWith('/auth') ||
+      req.path.startsWith('/clinics')
+    ) {
       return next();
     }
 
-    const rawClinicId = req.headers['x-clinic-id'] as string;
-    const rawUserRole = req.headers['x-user-role'] as string;
-    const rawUserId = req.headers['x-user-id'] as string;
+    let rawClinicId = req.headers['x-clinic-id'] as string;
+    let rawUserRole = req.headers['x-user-role'] as string;
+    let rawUserId = req.headers['x-user-id'] as string;
     const rawBreakGlass = req.headers['x-break-glass'] as string;
     const rawBreakGlassReason = req.headers['x-break-glass-reason'] as string;
+
+    // Check for Authorization: Bearer <JWT>
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7).trim();
+      try {
+        const decoded: any = jwt.decode(token);
+        if (decoded && typeof decoded === 'object') {
+          rawClinicId = rawClinicId || decoded.clinicId;
+          rawUserRole = rawUserRole || decoded.role;
+          rawUserId = rawUserId || decoded.sub;
+        }
+      } catch {}
+    }
 
     // Validate presence of essential multi-tenant and identity headers (HIPAA & SOC 2)
     if (!rawClinicId) {
       throw new BadRequestException(
-        'Missing required security header: "x-clinic-id". Tenant identification is mandatory.',
+        'Missing required tenant context ("x-clinic-id" or JWT clinicId). Tenant identification is mandatory.',
       );
     }
 
     if (!rawUserRole) {
       throw new BadRequestException(
-        'Missing required security header: "x-user-role". Role-based demarcation is mandatory.',
+        'Missing required security role ("x-user-role" or JWT role). Role-based demarcation is mandatory.',
       );
     }
 
     if (!rawUserId) {
       throw new BadRequestException(
-        'Missing required security header: "x-user-id". HIPAA § 164.312(a)(2)(i) prohibits unauthenticated access.',
+        'Missing required user context ("x-user-id" or JWT subject). HIPAA § 164.312(a)(2)(i) prohibits unauthenticated access.',
       );
     }
 

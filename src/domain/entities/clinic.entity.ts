@@ -8,30 +8,31 @@ export interface ClinicProperties {
 }
 
 export class ClinicEntity {
-  constructor(private readonly props: ClinicProperties) {}
+  readonly id: string;
+  readonly name: string;
+  readonly code: string;
+  readonly isActive: boolean;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
 
-  get id(): string {
-    return this.props.id;
+  constructor(props: ClinicProperties) {
+    this.id = props.id;
+    this.name = props.name;
+    this.code = props.code;
+    this.isActive = props.isActive;
+    this.createdAt = props.createdAt;
+    this.updatedAt = props.updatedAt;
   }
 
-  get name(): string {
-    return this.props.name;
-  }
-
-  get code(): string {
-    return this.props.code;
-  }
-
-  get isActive(): boolean {
-    return this.props.isActive;
-  }
-
-  get createdAt(): Date {
-    return this.props.createdAt;
-  }
-
-  get updatedAt(): Date {
-    return this.props.updatedAt;
+  toJSON() {
+    return {
+      id: this.id,
+      name: this.name,
+      code: this.code,
+      isActive: this.isActive,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+    };
   }
 
   static fromRow(row: any): ClinicEntity {
